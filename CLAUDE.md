@@ -2476,7 +2476,14 @@ number: change the table in that one module, never in one emulator.
   on the foldable; (4) Home/Lock are HID Consumer usages (Menu 0x40 / Power 0x30) to 0x32 — a Face ID
   device ignores the legacy home-button source — falling back to the legacy source (0x33) when
   refused; (5) the display state objects are ROCK proxies: no key-value coding, message primitives
-  through typed `objc_msgSend`. Input from the renderer is re-validated (`normalizeSimulatorInput`)
+  through typed `objc_msgSend`; (6) on Xcode 27.2 the Indigo route above is accepted and silently
+  dropped, so input goes to the simulator HID daemon's services (dtuhidd: `hid.digitizer`,
+  `hid.keyboard`, `hid.button`, reached through `lookup:` and the `_4sim` XPC bridge) whenever the
+  device serves them, and (1)–(4) apply only to an Xcode without them. MEASURED (iOS 27 simulator,
+  Xcode 27.2): Indigo taps, keys and Home never arrived; the daemon delivered taps, typing, Home,
+  Lock and the App Switcher swipe, which needs a slow climb to a quarter of the screen and position
+  reports through its pause (a quick or higher swipe went Home). The daemon's edges are 1 left /
+  2 top, the helper swaps them. Input from the renderer is re-validated (`normalizeSimulatorInput`)
   before it reaches the helper. A run node with a simulator device shows a 📱 button that opens (or
   focuses) the Simulator node for it. **Desktop only** (iOS devices need macOS; Android ones run
   everywhere): the add rows are disabled with `SIMULATOR_UNAVAILABLE_HINT` in a browser tab and

@@ -10,6 +10,14 @@
  * moved something fails with a sentence instead of a crash. The Indigo HID message layout is from
  * facebook/idb (FBSimulatorControl, MIT), whose reverse engineering tracks current Xcodes.
  *
+ * Input goes to the simulator HID daemon's services (dtuhidd, Xcode 27: hid.digitizer, hid.keyboard,
+ * hid.button) when the device serves them, the route Xcode's own device tool takes; the SimulatorKit
+ * Indigo messages remain for an Xcode without them. MEASURED on Xcode 27.2 (iOS 27 simulator): the
+ * Indigo touches, keys and Home press are accepted without an error and never reach the device, while
+ * the daemon route delivers taps, typing, Home, Lock and the App Switcher swipe. The daemon's payload
+ * keys follow meta/idb's DTUHIDModels.swift (MIT); its service connection follows arpan404/ace's
+ * SimHIDService (Apache-2.0).
+ *
  * Wire format
  *   stdout  frames: "NTF2" | u32 width | u32 height | u32 displayIndex | u32 jpegLength | jpeg   (LE)
  *   stdin   one JSON command per line:
@@ -25,7 +33,7 @@
  *
  * Kept free of backticks and dollar-brace sequences so it can live in a TypeScript string.
  */
-export const SIMBRIDGE_VERSION = 4
+export const SIMBRIDGE_VERSION = 5
 
 export const SIMBRIDGE_SOURCE = String.raw`
 import CoreGraphics
@@ -34,6 +42,7 @@ import Foundation
 import ImageIO
 import IOSurface
 import UniformTypeIdentifiers
+import XPC
 
 let statusLock = NSLock()
 func status(_ obj: [String: Any]) {
@@ -332,25 +341,121 @@ let messageForButton: ButtonFn? = dlsym(sk, "IndigoHIDMessageForButton").map { u
   }
 }
 
+// ── HID daemon services (Xcode 27) ─────────────────────────────────────────────────────────────
+// The simulator's HID daemon (dtuhidd) serves the touch screen, the keyboard and the buttons as
+// separate services, each taking {messageType, isBarrier, featureIdentifier, payload}. The payload
+// keys are dtuhidd's Codable ones, as meta/idb's DTUHIDModels.swift (MIT) records them.
+typealias EndpointFromPortFn = @convention(c) (mach_port_t) -> xpc_endpoint_t?
+typealias EnableSimToHostFn = @convention(c) (xpc_connection_t) -> Void
+typealias LookupFn = @convention(c) (AnyObject, Selector, NSString, UnsafeMutablePointer<NSError?>?) -> UInt32
+
+/// A connection to one of the booted simulator's HID services, or nil when this Xcode has none.
+func connectService(_ name: String) -> xpc_connection_t? {
+  guard let endpointSym = dlsym(UnsafeMutableRawPointer(bitPattern: -2), "xpc_endpoint_create_mach_port_4sim"),
+        let simToHostSym = dlsym(UnsafeMutableRawPointer(bitPattern: -2), "xpc_connection_enable_sim2host_4sim") else { return nil }
+  var err: NSError?
+  let service = "com.apple.coredevice.feature.remote.hid." + name
+  let port = unsafeBitCast(msgSend, to: LookupFn.self)(device, NSSelectorFromString("lookup:error:"), service as NSString, &err)
+  guard port != 0, let endpoint = unsafeBitCast(endpointSym, to: EndpointFromPortFn.self)(port) else { return nil }
+  let connection = xpc_connection_create_from_endpoint(endpoint)
+  xpc_connection_set_event_handler(connection) { event in
+    if xpc_get_type(event) == XPC_TYPE_ERROR { status(["error": name, "message": "the simulator's \(name) service went away"]) }
+  }
+  unsafeBitCast(simToHostSym, to: EnableSimToHostFn.self)(connection)
+  xpc_connection_activate(connection)
+  return connection
+}
+
+let digitizer = connectService("digitizer")
+let keyboard = connectService("keyboard")
+let buttons = connectService("button")
+status(["ok": "input", "route": digitizer == nil ? "legacy" : "hid-daemon"])
+
+/// One message to a daemon service; integers ride as uint64.
+@Sendable func daemonSend(_ connection: xpc_connection_t, service: String, type: String, payload: [String: Any]) {
+  func value(_ v: Any) -> xpc_object_t {
+    if let d = v as? [String: Any] {
+      let o = xpc_dictionary_create(nil, nil, 0)
+      for (k, item) in d { xpc_dictionary_set_value(o, k, value(item)) }
+      return o
+    }
+    if let n = v as? Double { return xpc_double_create(n) }
+    if let n = v as? UInt64 { return xpc_uint64_create(n) }
+    if let b = v as? Bool { return xpc_bool_create(b) }
+    if let t = v as? String { return xpc_string_create(t) }
+    return xpc_null_create()
+  }
+  let message = value(["messageType": type, "isBarrier": false, "featureIdentifier": "com.apple.coredevice.feature.remote.hid." + service,
+                       "payload": payload])
+  xpc_connection_send_message(connection, message)
+}
+
+/// A touch step to the digitizer service. Its edges are 1 left, 2 top, 3 bottom, 4 right; this
+/// helper's are 1 top, 2 left, so the first two swap.
+@Sendable func digitize(x: Double, y: Double, phase: String, edge: UInt32) {
+  guard let digitizer else { return }
+  daemonSend(digitizer, service: "digitizer", type: "IndigoDigitizerEvent", payload: [
+    "pointOne": ["x": x, "y": y],
+    "eventType": UInt64(phase == "down" ? 0 : phase == "up" ? 2 : 1),
+    "edge": UInt64(edge == 1 ? 2 : edge == 2 ? 1 : edge),
+    "target": UInt64(0),
+  ])
+}
+
+/// A keyboard usage (page 7) pressed or released: true when the daemon took it.
+@Sendable func daemonKey(_ usage: Int, down: Bool) -> Bool {
+  guard let keyboard else { return false }
+  daemonSend(keyboard, service: "keyboard", type: "IndigoKeyboardButtonEvent",
+             payload: ["usageCode": UInt64(usage), "state": UInt64(down ? 1 : 2)])
+  return true
+}
+
+/// A hardware button as a Consumer-page usage, pressed and released: true when the daemon took it.
+@Sendable func daemonButton(_ usage: UInt32) -> Bool {
+  guard let buttons else { return false }
+  daemonSend(buttons, service: "button", type: "IndigoButtonEvent", payload: ["usagePage": UInt64(0x0C), "usageCode": UInt64(usage), "state": UInt64(1)])
+  hidQueue.asyncAfter(deadline: .now() + 0.08) {
+    daemonSend(buttons, service: "button", type: "IndigoButtonEvent", payload: ["usagePage": UInt64(0x0C), "usageCode": UInt64(usage), "state": UInt64(2)])
+  }
+  return true
+}
+
+/// One finger step on whichever route this simulator takes.
+@Sendable func finger(x: Double, y: Double, phase: String, target: UInt32, edge: UInt32) {
+  if digitizer != nil { digitize(x: x, y: y, phase: phase, edge: edge) }
+  else { touch(x: x, y: y, down: phase != "up", target: target, edge: edge) }
+}
+
+/// A swipe from the bottom edge: up past the fraction "to" of the screen, held "hold" seconds before lifting.
+/// Quick and short, it is Home on a Face ID device; slower with a pause, the App Switcher.
+@Sendable func bottomSwipe(target: UInt32, to: Double, hold: Double) {
+  // A quick flick is Home; the App Switcher wants a slower climb (about half a second) before its pause.
+  let steps = hold > 0 ? 30 : 14
+  finger(x: 0.5, y: 0.995, phase: "down", target: target, edge: 3)
+  for i in 1...steps {
+    let y = 0.995 - to * Double(i) / Double(steps)
+    hidQueue.asyncAfter(deadline: .now() + 0.016 * Double(i)) { finger(x: 0.5, y: y, phase: "move", target: target, edge: 3) }
+  }
+  // A held finger keeps reporting where it is: a pause with no events reads as a lift to iOS.
+  let travel = 0.016 * Double(steps)
+  if hold > 0 {
+    for i in 1...Int(hold / 0.03) {
+      hidQueue.asyncAfter(deadline: .now() + travel + 0.03 * Double(i)) { finger(x: 0.5, y: 0.995 - to, phase: "move", target: target, edge: 3) }
+    }
+  }
+  hidQueue.asyncAfter(deadline: .now() + travel + hold) { finger(x: 0.5, y: 0.995 - to, phase: "up", target: target, edge: 3) }
+}
+
 // ── Gestures ───────────────────────────────────────────────────────────────────────────────────
-/// The App Switcher on a Face ID device: a finger from the bottom edge, up past a third of the
+/// The App Switcher on a Face ID device: a finger from the bottom edge, slowly up a quarter of the
 /// screen, a pause, then lift. The contact carries the bottom-edge flag (IndigoHIDEdgeBottom = 3):
 /// iOS recognises system edge gestures from that flag, not from where the finger started.
-@Sendable func appSwitcher(target: UInt32) {
-  let steps = 14
-  touch(x: 0.5, y: 0.995, down: true, target: target, edge: 3)
-  for i in 1...steps {
-    let y = 0.995 - 0.4 * Double(i) / Double(steps)
-    hidQueue.asyncAfter(deadline: .now() + 0.016 * Double(i)) { touch(x: 0.5, y: y, down: true, target: target, edge: 3) }
-  }
-  hidQueue.asyncAfter(deadline: .now() + 0.016 * Double(steps) + 0.6) { touch(x: 0.5, y: 0.595, down: false, target: target, edge: 3) }
-}
+@Sendable func appSwitcher(target: UInt32) { bottomSwipe(target: target, to: 0.25, hold: 0.9) }
 
 // ── Orientation ────────────────────────────────────────────────────────────────────────────────
 // A GSEvent "device orientation changed" (type 50) as a raw mach message to SpringBoard's
 // PurpleWorkspacePort, looked up in the device's bootstrap namespace — the layout from idb's
 // SimulatorPurpleHID. The framebuffer itself stays portrait; iOS draws rotated content into it.
-typealias LookupFn = @convention(c) (AnyObject, Selector, NSString, UnsafeMutablePointer<NSError?>?) -> UInt32
 let purpleQueue = DispatchQueue(label: "nt.simbridge.purple")
 @Sendable func orientation(_ value: UInt32) {
   purpleQueue.async {
@@ -389,12 +494,14 @@ DispatchQueue.global().async {
       // The panel edge the contact started on (1 top, 2 left, 3 bottom, 4 right): iOS recognises
       // its edge gestures — the home swipe up from the bottom — from this flag alone.
       let edge = UInt32(min(4, max(0, (cmd["edge"] as? Int) ?? 0)))
-      touch(x: min(1, max(0, x)), y: min(1, max(0, y)), down: t != "up", target: target, edge: edge)
+      finger(x: min(1, max(0, x)), y: min(1, max(0, y)), phase: t, target: target, edge: edge)
     case "key":
       guard let usage = cmd["usage"] as? Int, (0..<256).contains(usage), let down = cmd["down"] as? Bool else { continue }
-      send(messageForKey(Int32(usage), down ? 1 : 2))
+      if !daemonKey(usage, down: down) { send(messageForKey(Int32(usage), down ? 1 : 2)) }
     case "button":
-      button((cmd["name"] as? String) ?? "")
+      let name = (cmd["name"] as? String) ?? ""
+      if let usage = consumerUsage[name], daemonButton(usage) { break }
+      button(name)
     case "gesture":
       if (cmd["name"] as? String) == "app-switcher" {
         let target = frameQueue.sync { touchTarget(displays[activeIndex]) }
