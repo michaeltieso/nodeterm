@@ -329,10 +329,24 @@ describe('bootSimulatorWith', () => {
     return { calls, exec }
   }
 
-  it('opens Simulator.app after booting, as a run node always has', async () => {
+  it('shows the device in DeviceHub after booting', async () => {
     const r = recorder()
     expect(await bootSimulatorWith(UDID, {}, r.exec)).toBe(true)
-    expect(r.calls).toEqual([`/usr/bin/xcrun simctl boot ${UDID}`, '/usr/bin/open -a Simulator'])
+    expect(r.calls).toEqual([`/usr/bin/xcrun simctl boot ${UDID}`, '/usr/bin/open -b com.apple.dt.Devices'])
+  })
+
+  it('falls back to Simulator.app on an Xcode without DeviceHub', async () => {
+    const calls: string[] = []
+    const exec = async (file: string, args: string[]) => {
+      calls.push([file, ...args].join(' '))
+      if (args[1] === 'com.apple.dt.Devices') throw new Error('Unable to find application')
+    }
+    expect(await bootSimulatorWith(UDID, {}, exec)).toBe(true)
+    expect(calls).toEqual([
+      `/usr/bin/xcrun simctl boot ${UDID}`,
+      '/usr/bin/open -b com.apple.dt.Devices',
+      '/usr/bin/open -a Simulator',
+    ])
   })
 
   it('stays headless when the caller is the Simulator node itself', async () => {

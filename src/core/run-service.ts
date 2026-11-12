@@ -234,7 +234,7 @@ export async function listDevices(refresh = false): Promise<RunDevicesResult> {
 type BootExec = (file: string, args: string[], opts: { timeout: number }) => Promise<unknown>
 
 export interface BootOptions {
-  /** Open Simulator.app once the device is booted — what a run node's Boot has always done, so a
+  /** Show the device in DeviceHub (Simulator.app before Xcode 27) once it is booted, so a
    *  user without a Simulator node still sees the device. A Simulator node boots WITHOUT it: it is
    *  the device's screen itself, and MEASURED (Xcode 27) a device takes input only from its FIRST
    *  HID client, so a window showing it would take touch input away from the node. Default true. */
@@ -269,17 +269,19 @@ export async function bootSimulatorReport(udid: unknown, opts: BootOptions, exec
 }
 
 /**
- * Show Simulator.app, best effort. `open -a Simulator` needs LaunchServices to know the app, and on
- * a machine where it does not (MEASURED: a Mac whose Xcode ships no registered Simulator.app —
- * "Unable to find application named 'Simulator'") the bundle inside the active Xcode is tried. A
- * machine with neither runs its simulators headless, which is fine: the app runs either way.
+ * Show the simulator, best effort. Xcode 27 shows it in DeviceHub (`com.apple.dt.Devices`); an
+ * older Xcode ships Simulator.app, which `open -a Simulator` finds when LaunchServices knows it and
+ * the active Xcode's own copy otherwise. A machine with none runs its simulators headless, which is
+ * fine: the app runs either way.
  */
 async function openSimulatorApp(exec: BootExec): Promise<void> {
-  try {
-    await exec('/usr/bin/open', ['-a', 'Simulator'], { timeout: 15_000 })
-    return
-  } catch {
-    /* try the active Xcode's own copy */
+  for (const args of [['-b', 'com.apple.dt.Devices'], ['-a', 'Simulator']]) {
+    try {
+      await exec('/usr/bin/open', args, { timeout: 15_000 })
+      return
+    } catch {
+      /* try the next one */
+    }
   }
   try {
     const { stdout } = (await exec('/usr/bin/xcode-select', ['-p'], { timeout: 5_000 })) as { stdout: string }

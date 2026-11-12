@@ -2446,8 +2446,9 @@ number: change the table in that one module, never in one emulator.
   printed is its DDS proxy, gone with the detached tool. `simulatorVmServiceUrl` reads the app's
   own "The Dart VM service is listening on …" line from `simctl spawn <udid> log show` (~3 s) and
   takes the newest one whose process is still alive (`parseVmServiceLog`); not found ⇒ the switch
-  is refused with Rebuild offered. Some Macs ship no registered `Simulator.app` (`open -a
-  Simulator` fails); booting falls back to the active Xcode's copy and otherwise runs headless. Flutter REFUSES a hand-passed `FLUTTER_APP_FLAVOR`, so after an
+  is refused with Rebuild offered. Booting shows the device in DeviceHub (`open -b
+  com.apple.dt.Devices`); without it, `Simulator.app` (`open -a Simulator`, then the active Xcode's
+  copy), and otherwise runs headless. Flutter REFUSES a hand-passed `FLUTTER_APP_FLAVOR`, so after an
   attach `appFlavor` is the pubspec default; an app whose `lib/` reads `appFlavor` is refused the
   switch with that reason. Dart `"request": "attach"` configurations run as `flutter attach` too;
   every other attach is still refused. No "bring simulator forward":
@@ -2490,7 +2491,7 @@ number: change the table in that one module, never in one emulator.
   it (`bridges` keyed by UDID, a late joiner replayed the last displays/ready). That is why the
   Simulator node's OWN Boot is headless (`bootSimulator(id, { openWindow: false })`): a window
   showing the device is a client too, and it took touch input away from the node. A run node's
-  Boot (`run:boot-device`) still opens Simulator.app as it always has — a user with no Simulator
+  Boot (`run:boot-device`) opens DeviceHub (Simulator.app before Xcode 27): a user with no Simulator
   node must still see the device. "Open in DeviceHub" (⋯ menu) says so in its tooltip.
   **The ⋯ menu** (`simulatorMenu.tsx`, pure) is a complete map of DeviceHub's menus, from the
   `…MenuItemProvider` names in Xcode 27's DeviceKit: what nodeterm can do runs — HID buttons
